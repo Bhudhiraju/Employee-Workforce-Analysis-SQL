@@ -1,0 +1,339 @@
+Workforce Shift & Productivity Tracking
+Tool: MySQL 8.0     Author: Harika Bhudhiraju     GitHub: github.com/Bhudhiraju
+
+SECTION A: Data Cleaning & Exploration
+
+Q1: Find records where Target_Units or Actual_Units is NULL
+
+-- Concepts : SELECT, WHERE, IS NULL, CASE WHEN
+-- Purpose  : Identify missing productivity data before analysis
+--            so that averages and totals are not silently wrong.
+-- Finding  : 2 records flagged — 1 Missing Actual, 1 Both Missing.
+
+SELECT
+    Record_ID,
+    Employee_ID,
+    Employee_Name,
+    Department,
+    Work_Date,
+    Target_Units,
+    Actual_Units,
+    CASE
+        WHEN Target_Units IS NULL AND Actual_Units IS NULL THEN 'Both Missing'
+        WHEN Target_Units IS NULL THEN 'Missing Target'
+        WHEN Actual_Units IS NULL THEN 'Missing Actual'
+    END AS Issue_Type
+FROM workforce_data
+WHERE Target_Units IS NULL
+   OR Actual_Units IS NULL;
+
+Q2: Find duplicate records (same Employee_ID + Work_Date)
+
+-- Concepts : GROUP BY, HAVING, COUNT
+-- Purpose  : Duplicates silently inflate productivity totals.
+--            Must be removed before any aggregation.
+-- Finding  : 14 duplicate combinations found, all appearing twice.
+
+SELECT
+    Employee_ID,
+    Work_Date,
+    COUNT(*) AS Duplicate_Count
+FROM workforce_data
+WHERE Employee_ID IS NOT NULL
+GROUP BY Employee_ID, Work_Date
+HAVING COUNT(*) > 1
+ORDER BY Duplicate_Count DESC;
+
+Q3: Count records per Department variant
+
+-- Concepts : GROUP BY, COUNT, ORDER BY
+-- Purpose  : Catalogue all spelling variants before cleaning
+--            so no variant is missed during standardisation.
+-- Finding  : 7 variants — finance, Ops, H.R. are dirty.
+--            Operations: Operations(106) + Ops(24) = 130 rows.
+--            HR: HR(63) + H.R.(16) = 79 rows.
+
+SELECT
+    Department,
+    COUNT(*) AS Record_Count
+FROM workforce_data
+GROUP BY Department
+ORDER BY Record_Count DESC;
+
+Q4: Standardise Department column using CASE WHEN
+
+-- Concepts : CASE WHEN, data standardisation
+-- Purpose  : Map all raw variants to 5 clean department names.
+-- Finding  : 579 rows returned with clean department labels.
+
+SELECT
+    Department AS Original_Department,
+    CASE
+        WHEN Department IN ('Ops', 'OPS', 'operations') THEN 'Operations'
+        WHEN Department IN ('sales', 'SALES')           THEN 'Sales'
+        WHEN Department = 'it'                          THEN 'IT'
+        WHEN Department = 'finance'                     THEN 'Finance'
+        WHEN Department IN ('Hr', 'H.R.')               THEN 'HR'
+        ELSE Department
+    END AS Clean_Department
+FROM workforce_data
+ORDER BY Clean_Department;
+
+Q5: Employee achievement % — flag those below 80%
+
+-- Concepts : AVG, GROUP BY, HAVING, aggregation filter
+-- Purpose  : Surface employees consistently missing their target.
+-- Finding  : 0 rows returned — all employees with 5+ records achieve
+--            above 80%. This is a positive finding: no employee has a
+--            sustained underperformance problem in this dataset.
+
+SELECT
+    Employee_ID,
+    Employee_Name,
+    COUNT(*)                                                 AS Total_Records,
+    ROUND(AVG(Target_Units), 2)                             AS Avg_Target,
+    ROUND(AVG(Actual_Units), 2)                             AS Avg_Actual,
+    ROUND((AVG(Actual_Units) / AVG(Target_Units)) * 100, 2) AS Achievement_Pct
+FROM workforce_data
+WHERE Target_Units  IS NOT NULL
+  AND Actual_Units  IS NOT NULL
+  AND Employee_ID   IS NOT NULL
+  AND Employee_Name IS NOT NULL
+GROUP BY Employee_ID, Employee_Name
+HAVING Achievement_Pct < 80
+   AND Total_Records > 5
+ORDER BY Achievement_Pct ASC;
+
+Q6: Department with highest average productivity gap
+
+-- Concepts : AVG, arithmetic in SELECT, GROUP BY
+-- Purpose  : Measure how far each department's actual output
+--            deviates from its row-level target on average.
+-- Finding  : All gaps are negative (Actual > Target). Ops has the
+--            largest gap (-6.50), suggesting targets are set too low.
+
+SELECT
+    Department,
+    ROUND(AVG(Target_Units - Actual_Units), 2) AS Avg_Gap
+FROM workforce_data
+WHERE Target_Units IS NOT NULL
+  AND Actual_Units IS NOT NULL
+GROUP BY Department
+ORDER BY Avg_Gap DESC;
+
+Q7: Employees with 3+ records of underperformance + poor attendance
+
+-- Concepts : WHERE with compound conditions, UPPER(), HAVING
+-- Purpose  : Identify employees whose absences correlate with
+--            missing unit targets — an HR risk signal.
+-- Finding  : 26 employees flagged with this combined pattern.
+
+SELECT
+    Employee_ID,
+    Employee_Name,
+    COUNT(*) AS Underperform_Count
+FROM workforce_data
+WHERE Actual_Units < Target_Units
+  AND (
+        UPPER(Attendance_Status) = 'ABSENT'
+     OR UPPER(Attendance_Status) = 'HALF DAY'
+      )
+GROUP BY Employee_ID, Employee_Name
+HAVING Underperform_Count > 3
+ORDER BY Underperform_Count DESC;
+
+Q8: Employees below company-wide average Actual_Units
+
+-- Concepts : Scalar subquery in HAVING, LIKE filter
+-- Purpose  : Benchmark each employee against the company average
+--            to prioritise coaching and support.
+-- Finding  : 22 employees fall below the company-wide average.
+
+SELECT
+    Employee_ID,
+    Employee_Name,
+    ROUND(AVG(Actual_Units), 2) AS Emp_Avg_Actual
+FROM workforce_data
+WHERE Actual_Units IS NOT NULL
+  AND Employee_ID   IS NOT NULL
+  AND Employee_Name IS NOT NULL
+  AND Employee_ID LIKE 'EMP%'
+GROUP BY Employee_ID, Employee_Name
+HAVING Emp_Avg_Actual < (
+    SELECT AVG(Actual_Units)
+    FROM workforce_data
+    WHERE Actual_Units IS NOT NULL
+)
+ORDER BY Emp_Avg_Actual ASC;
+
+SECTION B: Joins, Targets & Performance Analysis
+
+Q9: Join workforce_data with dept_targets
+
+-- Concepts : INNER JOIN, CASE WHEN inside ON clause
+-- Purpose  : Attach each row's monthly department target for
+--            downstream gap analysis.
+-- Finding  : 579 rows returned after join.
+
+SELECT
+    w.Employee_Name,
+    w.Work_Date,
+    w.Actual_Units,
+    d.Monthly_Target_Units,
+    CASE
+        WHEN w.Department IN ('Operations', 'operations', 'Ops', 'OPS') THEN 'Operations'
+        WHEN w.Department IN ('Sales', 'sales', 'SALES')                THEN 'Sales'
+        WHEN w.Department IN ('IT', 'it')                               THEN 'IT'
+        WHEN w.Department IN ('Finance', 'finance')                     THEN 'Finance'
+        WHEN w.Department IN ('HR', 'Hr', 'H.R.')                       THEN 'HR'
+        ELSE w.Department
+    END AS Clean_Department
+FROM workforce_data w
+INNER JOIN dept_targets d
+    ON d.Department = CASE
+        WHEN w.Department IN ('Operations', 'operations', 'Ops','OPS') THEN 'Operations'
+        WHEN w.Department IN ('Sales', 'sales', 'SALES')               THEN 'Sales'
+        WHEN w.Department IN ('IT', 'it')                              THEN 'IT'
+        WHEN w.Department IN ('Finance', 'finance')                    THEN 'Finance'
+        WHEN w.Department IN ('HR', 'Hr', 'H.R.')                      THEN 'HR'
+        ELSE w.Department
+    END
+ORDER BY w.Employee_Name;
+
+Q10: Find unmatched department variants using LEFT JOIN
+
+-- Concepts : LEFT JOIN, IS NULL filter to detect non-matching rows
+-- Purpose  : Validate all raw department values have a matching
+--            entry in the targets table.
+-- Finding  : 'H.R.' and 'Ops' are unmatched — confirmed dirty.
+
+SELECT
+    DISTINCT w.Department AS Unmatched_Department
+FROM workforce_data w
+LEFT JOIN dept_targets d
+    ON w.Department = d.Department
+WHERE d.Department IS NULL
+ORDER BY w.Department;
+
+Q11: Department performance vs monthly target
+
+-- Concepts : INNER JOIN, SUM, CASE WHEN status banding
+-- Purpose  : Classify each department as Exceeding / On Track / Behind
+--            relative to its monthly target.
+-- Finding  : All 5 departments are Exceeding their monthly targets.
+--            Targets may need upward revision for the next cycle.
+
+SELECT
+    d.Department,
+    SUM(w.Actual_Units)        AS Total_Actual,
+    d.Monthly_Target_Units     AS Monthly_Target,
+    CASE
+        WHEN SUM(w.Actual_Units) >= d.Monthly_Target_Units THEN 'Exceeding'
+        WHEN SUM(w.Actual_Units) >= d.Monthly_Target_Units * 0.9 THEN 'On Track'
+        ELSE 'Behind'
+    END AS Status
+FROM workforce_data w
+INNER JOIN dept_targets d
+    ON d.Department = CASE
+        WHEN w.Department IN ('Operations', 'operations', 'Ops', 'OPS') THEN 'Operations'
+        WHEN w.Department IN ('Sales', 'sales', 'SALES')                THEN 'Sales'
+        WHEN w.Department IN ('IT', 'it')                               THEN 'IT'
+        WHEN w.Department IN ('Finance', 'finance')                     THEN 'Finance'
+        WHEN w.Department IN ('HR', 'Hr', 'H.R.')                       THEN 'HR'
+        ELSE w.Department
+    END
+WHERE w.Actual_Units IS NOT NULL
+GROUP BY d.Department, d.Monthly_Target_Units
+ORDER BY Total_Actual DESC;
+
+SECTION C: Shift, Attendance & Manager Analysis
+
+Q12: Shift with highest average Actual_Units
+
+-- Concepts : LOWER(), CASE WHEN for normalisation, AVG, GROUP BY
+-- Purpose  : Determine which shift is most productive on average.
+-- Finding  : Evening (74.83) > Night (73.55) > Morning (70.20).
+
+SELECT
+    CASE
+        WHEN LOWER(Shift) IN ('morning', 'morn')   THEN 'Morning'
+        WHEN LOWER(Shift) IN ('evening', 'eve')    THEN 'Evening'
+        WHEN LOWER(Shift) IN ('night', 'nite')     THEN 'Night'
+        ELSE Shift
+    END AS Clean_Shift,
+    ROUND(AVG(Actual_Units), 2) AS Avg_Actual_Units
+FROM workforce_data
+WHERE Actual_Units IS NOT NULL
+GROUP BY Clean_Shift
+ORDER BY Avg_Actual_Units DESC;
+
+Q13: Attendance rate per department
+
+-- Concepts : LOWER(), conditional SUM, percentage calculation
+-- Purpose  : Measure present-day rate per department after
+--            standardising the Attendance_Status column.
+-- Finding  : Operations leads (35.4%), HR is lowest (26.6%).
+
+SELECT
+    CASE
+        WHEN LOWER(Department) IN ('ops', 'operations') THEN 'Operations'
+        WHEN LOWER(Department) = 'sales'                THEN 'Sales'
+        WHEN LOWER(Department) = 'it'                   THEN 'IT'
+        WHEN LOWER(Department) = 'finance'              THEN 'Finance'
+        WHEN LOWER(Department) IN ('hr', 'h.r.')        THEN 'HR'
+        ELSE Department
+    END AS Clean_Department,
+    COUNT(*) AS Total_Records,
+    SUM(CASE WHEN LOWER(Attendance_Status) = 'present' THEN 1 ELSE 0 END) AS Present_Count,
+    ROUND(
+        (SUM(CASE WHEN LOWER(Attendance_Status) = 'present' THEN 1 ELSE 0 END) / COUNT(*)) * 100,
+        2
+    ) AS Attendance_Rate_Percentage
+FROM workforce_data
+GROUP BY Clean_Department
+ORDER BY Attendance_Rate_Percentage DESC;
+
+Q14: Manager with most underperforming records
+
+-- Concepts : Conditional SUM, percentage calculation, GROUP BY
+-- Purpose  : Identify managers whose teams underperform most often.
+-- Finding  : Harika B has most records (70) but lowest rate (40%).
+--            Meghana T has highest rate (45.9%) — stronger concern.
+
+SELECT
+    Manager,
+    COUNT(*) AS Total_Records,
+    SUM(CASE WHEN Actual_Units < Target_Units THEN 1 ELSE 0 END) AS Underperform_Count,
+    ROUND(
+        (SUM(CASE WHEN Actual_Units < Target_Units THEN 1 ELSE 0 END) / COUNT(*)) * 100,
+        2
+    ) AS Underperform_Percentage
+FROM workforce_data
+WHERE Actual_Units IS NOT NULL
+  AND Target_Units IS NOT NULL
+GROUP BY Manager
+ORDER BY Underperform_Count DESC;
+
+Q15: Top performer per department
+
+-- Concepts : Window function RANK() OVER (PARTITION BY ... ORDER BY ...),
+--            subquery, GROUP BY
+-- Purpose  : Find the highest-averaging employee in each department.
+-- Finding  : HR — Revathi Kumar (116), IT — Aditya Nair (114),
+--            Operations — Karthik Nair (110), Finance — Ganesh Rao (102),
+--            Sales — Priya Sharma (94).
+
+SELECT *
+FROM (
+    SELECT
+        Department,
+        Employee_ID,
+        Employee_Name,
+        ROUND(AVG(Actual_Units), 2) AS Avg_Actual,
+        RANK() OVER (PARTITION BY Department ORDER BY AVG(Actual_Units) DESC) AS rnk
+    FROM workforce_data
+    WHERE Actual_Units IS NOT NULL
+    GROUP BY Department, Employee_ID, Employee_Name
+) ranked
+WHERE rnk = 1;
+
